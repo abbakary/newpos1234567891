@@ -3050,6 +3050,34 @@ def complete_order(request: HttpRequest, pk: int):
             return ''
 
     # If signature file missing but signature_data exists, decode it into an uploaded file
+    # First: enforce overrun reason if ETA exceeded. Accept overrun_reason from POST and save it before proceeding.
+    try:
+        # Fetch overrun reason from POST (either form field or json body fallback)
+        overrun_reason_input = request.POST.get('overrun_reason') or request.POST.get('delay_reason') or None
+    except Exception:
+        overrun_reason_input = None
+
+    try:
+        reference_time = o.started_at or o.created_at or timezone.now()
+        elapsed_minutes_check = int(((timezone.now() - reference_time).total_seconds()) // 60)
+    except Exception:
+        elapsed_minutes_check = None
+
+    if o.type == 'service' and o.estimated_duration and elapsed_minutes_check is not None:
+        try:
+            if elapsed_minutes_check > int(o.estimated_duration):
+                # Overrun happened. If reason provided in the completing POST, save it; otherwise require it.
+                if overrun_reason_input:
+                    o.overrun_reason = overrun_reason_input
+                    o.overrun_reported_at = timezone.now()
+                    o.overrun_reported_by = request.user
+                    o.save(update_fields=['overrun_reason','overrun_reported_at','overrun_reported_by'])
+                elif not o.overrun_reason:
+                    messages.error(request, 'Order has exceeded estimated time. Please provide a reason before completing.')
+                    return redirect('tracker:order_detail', pk=o.id)
+        except Exception:
+            pass
+
     if not sig and sig_data.startswith('data:image/') and ';base64,' in sig_data:
         try:
             header, b64 = sig_data.split(';base64,', 1)
