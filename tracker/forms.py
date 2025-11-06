@@ -4,7 +4,7 @@ import random
 import json
 from django import forms
 from django.contrib.auth.models import User, Group
-from .models import Customer, Order, Vehicle, InventoryItem, Profile, InventoryAdjustment, Branch, ServiceType, ServiceAddon
+from .models import Customer, Order, Vehicle, InventoryItem, Profile, InventoryAdjustment, Branch, ServiceType, ServiceAddon, Invoice, InvoiceLineItem, InvoicePayment
 
 
 class InventoryItemForm(forms.ModelForm):
