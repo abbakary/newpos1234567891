@@ -208,22 +208,36 @@ def create_order_from_document(request):
             # allow creating without a branch; branch field may be nullable depending on model
             pass
 
+        from .services import CustomerService, VehicleService
+
         extracted = extraction.extracted_data_json or {}
 
-        # Create or reuse customer
+        # Extract customer data
         cust_name = extraction.extracted_customer_name or extracted.get('customer_name') or 'Customer'
         cust_phone = extraction.extracted_customer_phone or extracted.get('customer_phone') or data.get('customer_phone') or ''
         cust_email = extraction.extracted_customer_email or extracted.get('customer_email') or ''
         cust_addr = getattr(extraction, 'extracted_customer_address', None) or extracted.get('address') or ''
 
-        customer = Customer.objects.create(
-            branch=user_branch,
-            full_name=cust_name,
-            phone=cust_phone,
-            email=cust_email or None,
-            address=cust_addr or None,
-            customer_type='personal'
-        )
+        # Create or get customer using centralized service
+        try:
+            customer, _ = CustomerService.create_or_get_customer(
+                branch=user_branch,
+                full_name=cust_name,
+                phone=cust_phone,
+                email=cust_email or None,
+                address=cust_addr or None,
+                customer_type='personal'
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create customer from extraction: {e}")
+            customer = Customer.objects.create(
+                branch=user_branch,
+                full_name=cust_name,
+                phone=cust_phone,
+                email=cust_email or None,
+                address=cust_addr or None,
+                customer_type='personal'
+            )
 
         # Vehicle
         extracted_plate = (
@@ -235,11 +249,11 @@ def create_order_from_document(request):
 
         vehicle = None
         if extracted_plate:
-            vehicle = Vehicle.objects.create(
+            vehicle = VehicleService.create_or_get_vehicle(
                 customer=customer,
-                plate_number=extracted_plate.upper(),
-                make=extracted.get('vehicle_make') or '',
-                model=extracted.get('vehicle_model') or ''
+                plate_number=extracted_plate,
+                make=extracted.get('vehicle_make'),
+                model=extracted.get('vehicle_model')
             )
 
         # Description and estimation
