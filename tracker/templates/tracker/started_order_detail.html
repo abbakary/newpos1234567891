@@ -451,7 +451,7 @@
       <div class="row g-3">
         {% for doc in documents %}
         <div class="col-lg-6">
-          <div class="card shadow-sm h-100">
+          <div class="card shadow-sm h-100" data-extraction-id="{% if doc.extraction %}{{ doc.extraction.id }}{% else %}{% endif %}">
             <div class="card-header bg-light d-flex justify-content-between align-items-center">
               <div>
                 <h6 class="mb-1"><i class="fa fa-file-pdf me-2" style="color: #dc3545;"></i>{{ doc.file_name }}</h6>
