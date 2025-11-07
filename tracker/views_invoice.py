@@ -23,16 +23,29 @@ logger = logging.getLogger(__name__)
 
 @login_required
 def invoice_create(request, order_id=None):
-    """Create a new invoice, optionally linked to an existing order"""
+    """Create a new invoice, optionally linked to an existing started order"""
+    from .services import CustomerService, VehicleService, OrderService
+
     order = None
     customer = None
     vehicle = None
-    
+    started_orders = []
+    plate_search = request.GET.get('plate', '').strip().upper()
+
+    user_branch = get_user_branch(request.user)
+
+    # If searching by plate, find all started orders for that plate
+    if plate_search:
+        started_orders = OrderService.find_all_started_orders_for_plate(user_branch, plate_search)
+
+    # If order_id is provided, load that order
     if order_id:
-        order = get_object_or_404(Order, pk=order_id)
+        order = get_object_or_404(Order, pk=order_id, branch=user_branch)
         customer = order.customer
         vehicle = order.vehicle
-    
+        # Mark it so we know it's a linked started order
+        plate_search = vehicle.plate_number if vehicle else ''
+
     if request.method == 'POST':
         try:
             form = InvoiceForm(request.POST, user=request.user)
