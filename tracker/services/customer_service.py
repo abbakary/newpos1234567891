@@ -251,6 +251,148 @@ class OrderService:
     """Service for managing order creation with proper customer and vehicle handling."""
 
     @staticmethod
+    def find_started_order_by_plate(
+        branch: Optional[Branch],
+        plate_number: str,
+        status: str = 'created'
+    ) -> Optional[Order]:
+        """
+        Find a started order by vehicle plate number.
+        Used to link invoice creation to existing started orders.
+
+        Args:
+            branch: User's branch
+            plate_number: Vehicle plate number
+            status: Order status to filter by (default: 'created')
+
+        Returns:
+            The Order if found, None otherwise
+        """
+        if not branch or not plate_number:
+            return None
+
+        plate_number = (plate_number or "").strip().upper()
+        try:
+            from tracker.models import Vehicle
+            vehicle = Vehicle.objects.filter(
+                plate_number__iexact=plate_number,
+                customer__branch=branch
+            ).first()
+
+            if not vehicle:
+                return None
+
+            # Find the most recent started order for this vehicle
+            order = Order.objects.filter(
+                vehicle=vehicle,
+                status=status
+            ).order_by('-created_at').first()
+
+            return order
+        except Exception as e:
+            logger.warning(f"Error finding started order by plate: {e}")
+            return None
+
+    @staticmethod
+    def find_all_started_orders_for_plate(
+        branch: Optional[Branch],
+        plate_number: str
+    ) -> list:
+        """
+        Find all started orders by vehicle plate number.
+        Used to show user list of available orders to link to.
+
+        Args:
+            branch: User's branch
+            plate_number: Vehicle plate number
+
+        Returns:
+            List of Order objects
+        """
+        if not branch or not plate_number:
+            return []
+
+        plate_number = (plate_number or "").strip().upper()
+        try:
+            from tracker.models import Vehicle
+            vehicle = Vehicle.objects.filter(
+                plate_number__iexact=plate_number,
+                customer__branch=branch
+            ).first()
+
+            if not vehicle:
+                return []
+
+            # Find all started orders for this vehicle, newest first
+            orders = Order.objects.filter(
+                vehicle=vehicle,
+                status='created'
+            ).select_related('customer').order_by('-created_at')
+
+            return list(orders)
+        except Exception as e:
+            logger.warning(f"Error finding started orders by plate: {e}")
+            return []
+
+    @staticmethod
+    def update_order_from_invoice(
+        order: Order,
+        customer: Customer,
+        vehicle: Optional[Vehicle] = None,
+        description: Optional[str] = None,
+        **kwargs
+    ) -> Order:
+        """
+        Update a started order with finalized details from invoice creation.
+        Used to sync customer/vehicle info from invoice back to the order.
+
+        Args:
+            order: The Order to update
+            customer: The Customer (may be existing or newly created)
+            vehicle: Optional Vehicle to associate
+            description: Updated order description
+            **kwargs: Additional fields to update
+
+        Returns:
+            The updated Order
+        """
+        if not order:
+            return None
+
+        try:
+            with transaction.atomic():
+                # Update customer if different
+                if order.customer_id != customer.id:
+                    order.customer = customer
+
+                # Update vehicle if provided
+                if vehicle and order.vehicle_id != vehicle.id:
+                    order.vehicle = vehicle
+
+                # Update description if provided
+                if description:
+                    order.description = description
+
+                # Update any additional fields
+                for field, value in kwargs.items():
+                    if hasattr(order, field) and value is not None:
+                        setattr(order, field, value)
+
+                # Mark as in progress if still created (customer has arrived and service starts)
+                if order.status == 'created':
+                    order.started_at = order.started_at or timezone.now()
+
+                order.save()
+
+                # Update customer visit tracking
+                CustomerService.update_customer_visit(customer)
+
+                return order
+        except Exception as e:
+            logger.warning(f"Error updating order from invoice: {e}")
+            raise
+
+    @staticmethod
     def create_order(
         customer: Customer,
         order_type: str,
