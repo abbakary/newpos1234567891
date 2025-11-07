@@ -1,6 +1,6 @@
 """
 Views for quick order start workflow and started orders management.
-Allows users to quickly start an order with plate number, then proceed with document extraction.
+Allows users to quickly start an order with plate number, then complete the order.
 """
 
 import json
@@ -12,9 +12,8 @@ from django.views.decorators.http import require_http_methods
 from django.utils import timezone
 from django.db import transaction
 
-from .models import Order, Customer, Vehicle, Branch, DocumentScan, DocumentExtraction, DocumentExtractionItem, ServiceType, ServiceAddon, InventoryItem
+from .models import Order, Customer, Vehicle, Branch, ServiceType, ServiceAddon, InventoryItem
 from .utils import get_user_branch
-from .extraction_utils import process_invoice_extraction
 
 logger = logging.getLogger(__name__)
 
