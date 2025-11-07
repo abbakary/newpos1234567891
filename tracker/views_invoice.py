@@ -54,6 +54,23 @@ def invoice_create(request, order_id=None):
             form = InvoiceForm(request.POST)
         if form.is_valid():
             cd = form.cleaned_data
+
+            # Check if user selected a started order to link to
+            selected_order_id = cd.get('selected_order_id') or request.POST.get('selected_order_id')
+            if selected_order_id and not order:
+                try:
+                    order = Order.objects.get(id=selected_order_id, branch=user_branch, status='created')
+                except Order.DoesNotExist:
+                    messages.error(request, 'Selected started order not found.')
+                    return render(request, 'tracker/invoice_create.html', {
+                        'form': form,
+                        'order': order,
+                        'customer': customer,
+                        'vehicle': vehicle,
+                        'started_orders': started_orders,
+                        'plate_search': plate_search,
+                    })
+
             # Resolve or create customer
             customer_obj = None
             try:
@@ -64,10 +81,7 @@ def invoice_create(request, order_id=None):
                     phone = (cd.get('customer_phone') or '').strip()
 
                     if name and phone:
-                        from .utils import get_user_branch as _get_user_branch
-                        from .services import CustomerService
-                        branch = _get_user_branch(request.user)
-
+                        branch = user_branch
                         try:
                             customer_obj, _ = CustomerService.create_or_get_customer(
                                 branch=branch,
@@ -92,7 +106,7 @@ def invoice_create(request, order_id=None):
                 customer_obj = customer
 
             invoice = form.save(commit=False)
-            invoice.branch = get_user_branch(request.user)
+            invoice.branch = user_branch
             if order:
                 invoice.order = order
             invoice.customer = customer_obj
@@ -111,42 +125,44 @@ def invoice_create(request, order_id=None):
             except Exception:
                 pass
             invoice.save()
-            # If this invoice was created from an order and service selection/ETA provided, update the order for tracking
+
+            # If this invoice was created from a started order, update the order with finalized details
             try:
                 if order:
-                    # Keep order's customer in sync with the customer chosen/created on the invoice
-                    try:
-                        if customer_obj and order.customer_id != getattr(customer_obj, 'id', None):
-                            order.customer = customer_obj
-                    except Exception:
-                        pass
+                    # Use the new OrderService to update the started order with invoice details
+                    order = OrderService.update_order_from_invoice(
+                        order=order,
+                        customer=customer_obj,
+                        vehicle=vehicle,
+                        description=request.POST.get('order_description') or order.description
+                    )
+
+                    # Also handle service selection/ETA if provided
                     sel = request.POST.get('service_selection')
                     est = request.POST.get('estimated_duration')
-                    if sel:
-                        # expected JSON array from client
-                        try:
-                            names = json.loads(sel)
-                        except Exception:
-                            # fallback to comma-separated
-                            names = [s.strip() for s in str(sel).split(',') if s.strip()]
-                        if names:
-                            # Append services/add-ons to order.description (not shown on invoice)
-                            base_desc = order.description or ''
-                            svc_text = ', '.join(names)
-                            lines = [l for l in base_desc.split('\n') if not (l.strip().lower().startswith('services:') or l.strip().lower().startswith('add-ons:') or l.strip().lower().startswith('tire services:'))]
-                            if order.type == 'sales':
-                                lines.append(f"Tire Services: {svc_text}")
-                            else:
-                                lines.append(f"Services: {svc_text}")
-                            order.description = '\n'.join([l for l in lines if l.strip()])
-                    if est:
-                        try:
-                            order.estimated_duration = int(est)
-                        except Exception:
-                            pass
-                    order.save()
+                    if sel or est:
+                        if sel:
+                            try:
+                                names = json.loads(sel)
+                            except Exception:
+                                names = [s.strip() for s in str(sel).split(',') if s.strip()]
+                            if names:
+                                base_desc = order.description or ''
+                                svc_text = ', '.join(names)
+                                lines = [l for l in base_desc.split('\n') if not (l.strip().lower().startswith('services:') or l.strip().lower().startswith('add-ons:') or l.strip().lower().startswith('tire services:'))]
+                                if order.type == 'sales':
+                                    lines.append(f"Tire Services: {svc_text}")
+                                else:
+                                    lines.append(f"Services: {svc_text}")
+                                order.description = '\n'.join([l for l in lines if l.strip()])
+                        if est:
+                            try:
+                                order.estimated_duration = int(est)
+                            except Exception:
+                                pass
+                        order.save()
             except Exception as e:
-                logger.warning(f"Failed to update order with service selection/ETA: {e}")
+                logger.warning(f"Failed to update order with invoice details: {e}")
 
             messages.success(request, f'Invoice {invoice.invoice_number} created successfully.')
             return redirect('tracker:invoice_detail', pk=invoice.pk)
