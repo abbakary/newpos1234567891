@@ -599,6 +599,152 @@
                   }
                 });
               }
+              // Upload vs Manual toggle
+              (function(){
+                const modeManual = document.getElementById('mode-manual');
+                const modeUpload = document.getElementById('mode-upload');
+                const uploadSection = document.getElementById('invoice-upload-section');
+                function updateMode(){
+                  if (modeUpload && modeUpload.checked){ uploadSection.classList.remove('d-none'); }
+                  else { uploadSection.classList.add('d-none'); }
+                }
+                if (modeManual && modeUpload){
+                  modeManual.addEventListener('change', updateMode);
+                  modeUpload.addEventListener('change', updateMode);
+                  updateMode();
+                }
+              })();
+
+              // Upload processing
+              (function(){
+                const area = document.getElementById('invoiceUploadArea');
+                const fileInput = document.getElementById('invoiceFileInput');
+                const selectBtn = document.getElementById('selectInvoiceFileBtn');
+                const progressWrap = document.getElementById('uploadProgress');
+                const progressBar = document.getElementById('uploadProgressBar');
+                const errorBox = document.getElementById('uploadError');
+                const successBox = document.getElementById('uploadSuccess');
+                const previewBox = document.getElementById('extractedDataPreview');
+                const nameEl = document.getElementById('extractedCustomerName');
+                const phoneEl = document.getElementById('extractedPhone');
+                const refEl = document.getElementById('extractedReference');
+                const addrEl = document.getElementById('extractedAddress');
+                const totalEl = document.getElementById('extractedTotal');
+                const useBtn = document.getElementById('useExtractedDataBtn');
+                const resetBtn = document.getElementById('resetUploadBtn');
+
+                if (!area || !fileInput) return;
+
+                function show(el){ el && el.classList.remove('d-none'); }
+                function hide(el){ el && el.classList.add('d-none'); }
+                function setProgress(p){ if(progressBar){ progressBar.style.width = Math.max(0, Math.min(100, p)) + '%'; } }
+                function getCSRF(){
+                  const name = 'csrftoken=';
+                  const parts = document.cookie.split(';');
+                  for (let i=0;i<parts.length;i++){ const c = parts[i].trim(); if (c.indexOf(name)===0) return c.substring(name.length); }
+                  const el = document.querySelector('input[name="csrfmiddlewaretoken"]');
+                  return el ? el.value : '';
+                }
+
+                function processFile(file){
+                  hide(errorBox); hide(successBox); show(progressWrap); setProgress(10);
+                  const fd = new FormData();
+                  fd.append('invoice_file', file);
+                  const controller = new AbortController();
+                  const tick = setInterval(()=>{
+                    const curr = parseInt(progressBar.style.width||'0');
+                    if (curr < 90) setProgress(curr + 5);
+                  }, 300);
+                  fetch('{% url "tracker:api_upload_extract_invoice" %}', {
+                    method: 'POST',
+                    body: fd,
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': getCSRF() },
+                    signal: controller.signal
+                  }).then(r=>r.json()).then(data=>{
+                    clearInterval(tick); setProgress(100);
+                    if (data && data.success && data.data){
+                      const d = data.data;
+                      nameEl.value = d.customer_name || '';
+                      phoneEl.value = d.customer_phone || '';
+                      refEl.value = d.reference || '';
+                      addrEl.value = d.customer_address || '';
+                      totalEl.value = (typeof d.total_amount !== 'undefined' && d.total_amount !== null) ? String(d.total_amount) : '';
+                      show(previewBox); show(successBox); successBox.textContent = 'Invoice processed successfully. Review and apply extracted data below.';
+                    } else {
+                      show(errorBox); errorBox.textContent = (data && data.error) ? data.error : 'Failed to extract data from invoice.';
+                    }
+                  }).catch(err=>{
+                    clearInterval(tick);
+                    show(errorBox); errorBox.textContent = 'Error processing invoice: ' + (err && err.message ? err.message : err);
+                  }).finally(()=>{
+                    setTimeout(()=>hide(progressWrap), 300);
+                  });
+                }
+
+                // Drag & drop
+                ['dragover','dragenter'].forEach(evt=>{
+                  area.addEventListener(evt, function(e){ e.preventDefault(); e.stopPropagation(); area.classList.add('is-dragover'); });
+                });
+                ['dragleave','dragend','drop'].forEach(evt=>{
+                  area.addEventListener(evt, function(e){ e.preventDefault(); e.stopPropagation(); area.classList.remove('is-dragover'); });
+                });
+                area.addEventListener('drop', function(e){
+                  const dt = e.dataTransfer; if (!dt || !dt.files || !dt.files.length) return;
+                  processFile(dt.files[0]);
+                });
+
+                // Click to select
+                area.addEventListener('click', ()=> fileInput.click());
+                if (selectBtn) selectBtn.addEventListener('click', (e)=>{ e.preventDefault(); fileInput.click(); });
+                fileInput.addEventListener('change', function(){ if (this.files && this.files[0]) processFile(this.files[0]); });
+
+                // Apply extracted data to form
+                if (useBtn){
+                  useBtn.addEventListener('click', function(){
+                    const f = document.querySelector('form'); if (!f) return;
+                    const map = {
+                      'customer_full_name': nameEl.value,
+                      'customer_phone': phoneEl.value,
+                      'customer_address': addrEl.value,
+                      'reference': refEl.value
+                    };
+                    Object.keys(map).forEach(k=>{
+                      const input = f.querySelector(`[name="${k}"]`);
+                      if (input){ input.value = map[k] || ''; input.dispatchEvent(new Event('input', { bubbles:true })); }
+                    });
+                    // Optional: reflect totals preview if available
+                    try{
+                      const netEl = document.getElementById('previewNet');
+                      const vatEl = document.getElementById('previewVAT');
+                      const grossEl = document.getElementById('previewGross');
+                      const taxRateEl = document.getElementById('previewTaxRate');
+                      const taxRate = Number(document.querySelector('[name="tax_rate"]').value || 0);
+                      const gross = Number(totalEl.value || 0);
+                      if (gross && grossEl){
+                        const vat = (taxRate/ (100+taxRate)) * gross;
+                        const net = gross - vat;
+                        if (netEl) netEl.textContent = net.toFixed(2) + ' TSH';
+                        if (vatEl) vatEl.textContent = vat.toFixed(2) + ' TSH';
+                        if (taxRateEl) taxRateEl.textContent = taxRate.toFixed(2);
+                        grossEl.textContent = gross.toFixed(2) + ' TSH';
+                      }
+                    }catch(e){}
+                    // Hide preview after applying
+                    hide(previewBox);
+                    show(successBox); successBox.textContent = 'Extracted data applied to form.';
+                  });
+                }
+
+                // Reset upload state
+                if (resetBtn){
+                  resetBtn.addEventListener('click', function(){
+                    fileInput.value='';
+                    setProgress(0);
+                    hide(previewBox); hide(errorBox); hide(successBox); hide(progressWrap);
+                  });
+                }
+              })();
+
             </script>
           </form>
         </div>
