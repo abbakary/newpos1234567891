@@ -18,6 +18,7 @@ from django.db import transaction
 from .models import Invoice, InvoiceLineItem, InvoicePayment, Order, Customer, Vehicle, InventoryItem
 from .forms import InvoiceForm, InvoiceLineItemForm, InvoicePaymentForm
 from .utils import get_user_branch
+from .services import OrderService, CustomerService, VehicleService
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,6 @@ def api_search_started_orders(request):
     Returns JSON with list of available started orders
     """
     from django.http import JsonResponse
-    from .services import OrderService
 
     plate = (request.GET.get('plate') or '').strip().upper()
     if not plate:
