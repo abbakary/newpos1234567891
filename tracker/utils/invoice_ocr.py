@@ -247,8 +247,8 @@ class InvoiceDataExtractor:
             # Enhance image for better OCR
             img = img.convert('RGB')
 
-            # Use pytesseract to extract text
-            text = pytesseract.image_to_string(img, lang='eng')
+            # Use layout-aware OCR to reconstruct horizontal lines
+            text = self._ocr_image_to_lines(img)
             return text
         except Exception as e:
             logger.error(f"Error extracting text from image: {e}")
