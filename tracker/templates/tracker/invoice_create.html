@@ -533,8 +533,8 @@
               // Upload vs Manual toggle
               (function(){
                 const modeManual = document.getElementById('mode-manual');
-                const modeUpload = document.getElementById('mode-upload');
-                const uploadSection = document.getElementById('invoice-upload-section');
+                const modeUpload = null; // upload UI removed
+                const uploadSection = null; // upload UI removed
                 function updateMode(){
                   if (modeUpload && modeUpload.checked){ uploadSection.classList.remove('d-none'); }
                   else { uploadSection.classList.add('d-none'); }
