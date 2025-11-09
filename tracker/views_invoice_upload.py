@@ -73,12 +73,16 @@ def api_extract_invoice_preview(request):
             'error': str(e)
         })
     
-    # If extraction failed
+    # If extraction failed - still return partial data for manual completion
     if not extracted.get('success'):
+        logger.info(f"Extraction failed: {extracted.get('error')} - {extracted.get('message')}")
         return JsonResponse({
             'success': False,
-            'message': extracted.get('message', 'Could not extract data from PDF'),
-            'error': extracted.get('error')
+            'message': extracted.get('message', 'Could not extract data from PDF. Please enter invoice details manually.'),
+            'error': extracted.get('error'),
+            'raw_text': extracted.get('raw_text', ''),
+            'header': extracted.get('header', {}),
+            'items': extracted.get('items', [])
         })
     
     # Return extracted preview data
