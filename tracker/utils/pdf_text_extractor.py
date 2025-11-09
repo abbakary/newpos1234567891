@@ -267,23 +267,44 @@ def parse_invoice_data(text: str) -> dict:
             pass
         return None
 
-    # Extract monetary amounts using flexible patterns
+    # Extract monetary amounts using flexible patterns (handles scrambled PDFs)
     def find_amount(label_patterns):
-        """Find monetary amount after label patterns"""
+        """Find monetary amount after label patterns - works with scrambled PDF text"""
         patterns = (label_patterns if isinstance(label_patterns, list) else [label_patterns])
         for pattern in patterns:
-            # Try with colon
+            # Try with colon separator: "Label: Amount"
             m = re.search(rf'{pattern}\s*:\s*(?:TSH|TZS|UGX)?\s*([0-9\,\.]+)', normalized_text, re.I | re.MULTILINE)
             if m:
                 return m.group(1)
-            # Try with equals
+
+            # Try with equals: "Label = Amount"
             m = re.search(rf'{pattern}\s*=\s*(?:TSH|TZS|UGX)?\s*([0-9\,\.]+)', normalized_text, re.I | re.MULTILINE)
             if m:
                 return m.group(1)
-            # Try with just space
+
+            # Try with space and optional currency on same line
             m = re.search(rf'{pattern}\s+(?:TSH|TZS|UGX)?\s*([0-9\,\.]+)', normalized_text, re.I | re.MULTILINE)
             if m:
                 return m.group(1)
+
+            # Try finding amount on next line (for scrambled PDFs)
+            lines = normalized_text.split('\n')
+            for i, line in enumerate(lines):
+                if re.search(pattern, line, re.I):
+                    # Check for amount on same line
+                    m = re.search(rf'{pattern}\s*[:=]?\s*([0-9\,\.]+)', line, re.I)
+                    if m:
+                        return m.group(1)
+
+                    # Check next 2 lines for amount
+                    for j in range(1, 3):
+                        if i + j < len(lines):
+                            next_line = lines[i + j].strip()
+                            # Look for amount pattern
+                            if re.match(r'^(?:TSH|TZS|UGX)?\s*([0-9\,\.]+)', next_line, re.I):
+                                m = re.match(r'^(?:TSH|TZS|UGX)?\s*([0-9\,\.]+)', next_line, re.I)
+                                if m:
+                                    return m.group(1)
         return None
 
     # Extract Net Value / Subtotal
