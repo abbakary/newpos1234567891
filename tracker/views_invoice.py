@@ -309,7 +309,7 @@ def api_upload_extract_invoice(request):
                     # Extract and validate quantity
                     qty = it.get('qty') or 1
                     try:
-                        qty = int(float(qty)) if qty else 1
+                        qty = float(qty) if qty else 1
                     except (ValueError, TypeError):
                         qty = 1
 
@@ -317,8 +317,21 @@ def api_upload_extract_invoice(request):
                     if qty < 1:
                         qty = 1
 
-                    # Extract unit price (value or rate)
-                    unit_price = it.get('value') or it.get('rate') or Decimal('0')
+                    # Extract unit price - prefer 'rate' (unit price), fallback to calculated from value/qty
+                    unit_price = it.get('rate')
+                    if not unit_price:
+                        # If rate not available, try to calculate from value and qty
+                        value = it.get('value')
+                        if value and qty > 0:
+                            try:
+                                value_dec = Decimal(str(value).replace(',', '')) if isinstance(value, str) else Decimal(str(value))
+                                unit_price = value_dec / Decimal(str(qty))
+                            except (ValueError, TypeError, Exception):
+                                unit_price = Decimal('0')
+                        else:
+                            unit_price = Decimal('0')
+
+                    # Convert unit_price to Decimal
                     try:
                         if isinstance(unit_price, (int, float)):
                             unit_price = Decimal(str(unit_price))
@@ -333,7 +346,7 @@ def api_upload_extract_invoice(request):
                     item_code = (it.get('item_code') or it.get('code') or '').strip() or None
                     description = (it.get('description') or 'Item').strip()
 
-                    # Create line item
+                    # Create line item with proper unit_price
                     line = InvoiceLineItem(
                         invoice=inv,
                         code=item_code,
