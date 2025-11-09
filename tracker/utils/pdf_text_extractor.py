@@ -410,31 +410,28 @@ def parse_invoice_data(text: str) -> dict:
         r'Total\s*(?::|\s)'
     ]))
 
-    # Extract line items with improved detection for scrambled PDFs
+    # Extract line items with improved detection for various formats
+    # The algorithm:
+    # 1. Find the table header row (contains item-related keywords)
+    # 2. Parse all lines after the header until we hit a totals section
+    # 3. For each item line, extract: description, code, qty, unit, rate, value
     items = []
     item_section_started = False
     item_header_idx = -1
-    current_item = {}
 
     for idx, line in enumerate(lines):
         line_stripped = line.strip()
         if not line_stripped:
-            # Empty line might signal end of current item
-            if current_item and ('description' in current_item or 'value' in current_item):
-                # Finalize current item if we have enough info
-                if current_item.get('description') and (current_item.get('value') or current_item.get('qty')):
-                    items.append(current_item)
-                    current_item = {}
             continue
 
-        # Detect item section header
+        # Detect item section header - line with multiple item-related keywords
         keyword_count = sum([
-            1 if re.search(r'\b(?:Sr|S\.N|Serial)\b', line_stripped, re.I) else 0,
+            1 if re.search(r'\b(?:Sr|S\.N|Serial|No\.?)\b', line_stripped, re.I) else 0,
             1 if re.search(r'\b(?:Item|Code)\b', line_stripped, re.I) else 0,
             1 if re.search(r'\b(?:Description|Desc)\b', line_stripped, re.I) else 0,
-            1 if re.search(r'\b(?:Qty|Quantity)\b', line_stripped, re.I) else 0,
-            1 if re.search(r'\b(?:Rate|Price|Unit)\b', line_stripped, re.I) else 0,
-            1 if re.search(r'\b(?:Value|Amount)\b', line_stripped, re.I) else 0,
+            1 if re.search(r'\b(?:Qty|Quantity|Qty\.?|Type)\b', line_stripped, re.I) else 0,
+            1 if re.search(r'\b(?:Rate|Price|Unit|UnitPrice)\b', line_stripped, re.I) else 0,
+            1 if re.search(r'\b(?:Value|Amount|Total)\b', line_stripped, re.I) else 0,
         ])
 
         if keyword_count >= 3:
@@ -444,89 +441,112 @@ def parse_invoice_data(text: str) -> dict:
 
         # Stop at totals/summary section
         if item_section_started and idx > item_header_idx + 1:
-            if re.search(r'(?:Net\s*Value|Gross\s*Value|Payment|Delivery|Remarks|NOTE)', line_stripped, re.I):
-                # Finalize any pending item
-                if current_item and ('description' in current_item or 'value' in current_item):
-                    items.append(current_item)
+            if re.search(r'(?:Net\s*Value|Gross\s*Value|Grand\s*Total|Total\s*:|Payment|Delivery|Remarks|NOTE)', line_stripped, re.I):
                 break
 
         # Parse item lines (after header starts)
         if item_section_started and idx > item_header_idx:
-            # Look for numeric patterns - could be sr no, code, qty, rate, or value
+            # Extract all numbers and their positions
             numbers = re.findall(r'[0-9\,]+\.?\d*', line_stripped)
 
-            # Extract text (non-numeric part)
+            # Extract text parts by removing numbers
             text_only = re.sub(r'[0-9\,]+\.?\d*', '|', line_stripped)
             text_parts = [p.strip() for p in text_only.split('|') if p.strip()]
 
-            # Case 1: Line looks like "Sr Code Description Qty Rate Value" (table row)
-            if len(numbers) >= 1 and text_parts:
-                # Try to identify what the numbers represent
-                # Usually: Sr#, ItemCode, Qty, Rate, Value
-                # Description is text parts joined
-                desc = ' '.join(text_parts)
-                if desc and len(desc) > 2:
-                    try:
-                        # Convert all numbers to floats for comparison
-                        float_numbers = [float(n.replace(',', '')) for n in numbers]
+            # Skip if this line has no meaningful content
+            if not numbers and not text_parts:
+                continue
 
-                        # Largest number is likely the value/price
-                        value = max(float_numbers) if float_numbers else None
+            # Process a line with both text and numbers (typical item row)
+            if text_parts and numbers:
+                try:
+                    # Join text parts as description
+                    full_text = ' '.join(text_parts)
 
-                        # Look for qty among smaller numbers (usually 1-100, often integer)
-                        qty = 1
+                    # Skip if description is too short (likely a header continuation)
+                    if len(full_text) < 2:
+                        continue
+
+                    # Convert numbers to floats
+                    float_numbers = [float(n.replace(',', '')) for n in numbers]
+
+                    # Initialize item
+                    item = {
+                        'description': full_text[:255],
+                        'qty': 1,
+                        'unit': None,
+                        'value': None,
+                        'rate': None,
+                    }
+
+                    # Try to extract item code (usually first number if small, or in the text)
+                    if float_numbers:
+                        code_match = re.search(r'\b(\d{3,6})\b', full_text)
+                        if code_match:
+                            item['code'] = code_match.group(1)
+
+                    # Extract unit (NOS, PCS, HR, etc.) from text
+                    unit_match = re.search(r'\b(NOS|PCS|KG|HR|LTR|PIECES?|UNITS?|BOX|CASE|SETS?|PC|KIT)\b', line_stripped, re.I)
+                    if unit_match:
+                        item['unit'] = unit_match.group(1).upper()
+                        # Remove unit from description if present
+                        item['description'] = re.sub(r'\b' + unit_match.group(1) + r'\b', '', item['description'], flags=re.I).strip()[:255]
+
+                    # Parse quantities and amounts from numbers
+                    if len(float_numbers) == 1:
+                        # Single number: likely the total value
+                        item['value'] = to_decimal(str(float_numbers[0]))
+                    elif len(float_numbers) == 2:
+                        # Two numbers: qty and value (or rate and value)
+                        # Smaller number is likely qty
+                        if float_numbers[0] < float_numbers[1]:
+                            item['qty'] = int(float_numbers[0]) if float_numbers[0] == int(float_numbers[0]) else float_numbers[0]
+                            item['value'] = to_decimal(str(float_numbers[1]))
+                        else:
+                            item['qty'] = int(float_numbers[1]) if float_numbers[1] == int(float_numbers[1]) else float_numbers[1]
+                            item['value'] = to_decimal(str(float_numbers[0]))
+                    elif len(float_numbers) >= 3:
+                        # Multiple numbers: try to parse as Sr#, Code, Qty, Rate, Value
+                        # Usually: value is largest, qty is small integer, rate is medium
+                        sorted_nums = sorted(enumerate(float_numbers), key=lambda x: x[1])
+
+                        # Smallest might be qty if it's 1-1000 and integer-like
+                        min_num = float_numbers[0]
+                        max_num = max(float_numbers)
+
+                        # Try to identify qty (should be small and integer-like)
                         for fn in float_numbers:
-                            # If it's smaller than value and looks like a quantity
-                            if value and fn < value and 0.1 < fn < 10000:
-                                # Check if it's likely a quantity (integer or very small decimal)
-                                if fn == int(fn) or (fn - int(fn)) < 0.5:
-                                    qty = int(fn)
+                            if 0.1 < fn < 1000 and (fn == int(fn) or abs(fn - round(fn)) < 0.1):
+                                if fn <= max_num / 100:  # Much smaller than max
+                                    item['qty'] = int(round(fn))
                                     break
 
-                        # If we only have one number, use it as value, qty stays 1
-                        if len(numbers) == 1:
-                            value = float_numbers[0]
+                        # Largest number is likely the total value
+                        item['value'] = to_decimal(str(max_num))
 
-                        current_item = {
-                            'description': desc[:255],
-                            'qty': qty,
-                            'value': to_decimal(str(value)) if value else None
-                        }
-                        items.append(current_item)
-                        current_item = {}
-                    except Exception as e:
-                        logger.warning(f"Error parsing item line: {line_stripped}, {e}")
+                    # Only add if we have at least description and value
+                    if item.get('description') and (item.get('value') or item.get('qty')):
+                        items.append(item)
 
-            # Case 2: Line is purely descriptive text (likely description for current item)
-            elif text_parts and not numbers:
-                # This is likely a description line
-                desc_text = ' '.join(text_parts)
-                if desc_text and len(desc_text) > 2:
-                    if 'description' not in current_item:
-                        current_item['description'] = desc_text[:255]
-                    else:
-                        # Append to existing description
-                        current_item['description'] = (current_item['description'] + ' ' + desc_text)[:255]
+                except Exception as e:
+                    logger.warning(f"Error parsing item line: {line_stripped}, {e}")
 
-            # Case 3: Line with just numbers (could be qty, rate, or value)
+            # Process line with only numbers (continuation of item data)
             elif numbers and not text_parts:
-                # Try to figure out what this number represents
-                # Usually small numbers are qty, large numbers are values/rates
+                # Skip standalone number lines (likely part of header or footer)
+                if len(items) == 0:
+                    continue
+
                 try:
-                    num_val = float(numbers[0].replace(',', ''))
-                    if 0.1 < num_val < 1000 and '.' not in numbers[0]:
-                        # Looks like a quantity
-                        current_item['qty'] = int(num_val)
-                    else:
-                        # Looks like a monetary amount
-                        if 'value' not in current_item:
-                            current_item['value'] = to_decimal(numbers[0])
+                    float_numbers = [float(n.replace(',', '')) for n in numbers]
+                    # Treat largest number as value
+                    value = max(float_numbers)
+                    if value > 0 and items:
+                        # Only update if item doesn't have a value yet
+                        if not items[-1].get('value'):
+                            items[-1]['value'] = to_decimal(str(value))
                 except Exception:
                     pass
-
-    # Finalize any pending item
-    if current_item and ('description' in current_item or 'value' in current_item):
-        items.append(current_item)
 
     return {
         'invoice_no': invoice_no,
