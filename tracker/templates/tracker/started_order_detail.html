@@ -596,6 +596,12 @@
                 startedUploadError.className = isDanger ? 'alert alert-danger' : 'alert alert-warning';
               }
 
+              function showSuccess(message, isDanger = false){
+                startedUploadError.style.display = 'block';
+                startedUploadError.innerHTML = message;
+                startedUploadError.className = 'alert alert-success';
+              }
+
               function resetForm(){
                 if (fileInput) fileInput.value = '';
                 startedUploadError.style.display = 'none';
