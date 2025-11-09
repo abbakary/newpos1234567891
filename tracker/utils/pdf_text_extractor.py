@@ -197,12 +197,14 @@ def parse_invoice_data(text: str) -> dict:
         """Check if text looks like a company/person name vs an address."""
         if not text:
             return False
-        # Customer names are usually shorter, no commas or street keywords
-        address_keywords = ['street', 'avenue', 'road', 'box', 'p.o', 'po', 'floor', 'apt', 'suite', 'district', 'region', 'country']
-        is_short = len(text) < 80
+        # Customer names can be company names (usually all caps or mixed case) or person names
+        # They don't contain location indicators
+        address_keywords = ['street', 'avenue', 'road', 'box', 'p.o', 'po', 'floor', 'apt', 'suite', 'district', 'region']
         has_no_address_keywords = not any(kw in text.lower() for kw in address_keywords)
-        is_capitalized = text[0].isupper() if text else False
-        return is_short and has_no_address_keywords and is_capitalized
+        # Company names often have 'CO', 'LTD', 'INC', etc.
+        is_capitalized = len(text) > 2 and (text[0].isupper() or text.isupper())
+        # Don't reject if it contains location names in a company context (like "SAID SALIM BAKHRESA CO LTD")
+        return has_no_address_keywords and is_capitalized and len(text) > 3
 
     def is_likely_address(text):
         """Check if text looks like an address."""
@@ -213,8 +215,8 @@ def parse_invoice_data(text: str) -> dict:
                              'district', 'region', 'city', 'country', 'zip', 'postal', 'dar', 'dar-es', 'tanzania', 'nairobi', 'kenya']
         has_indicators = any(ind in text.lower() for ind in address_indicators)
         has_numbers = bool(re.search(r'\d+', text))
-        is_longer = len(text) > 15
-        return has_indicators or (has_numbers and is_longer)
+        has_multipart = ',' in text or len(text.split()) > 2  # Addresses often have multiple parts
+        return has_indicators or (has_numbers and has_multipart)
 
     # Extract customer name
     customer_name = extract_field_value([
