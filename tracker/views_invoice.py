@@ -371,8 +371,10 @@ def api_upload_extract_invoice(request):
                 except Exception as e:
                     logger.warning(f"Failed to create invoice line item from {it}: {e}")
 
-        # Recalculate totals
-        inv.calculate_totals()
+        # Recalculate totals only if we have line items
+        # If no line items were created from extraction, preserve the extracted totals
+        if inv.line_items.exists():
+            inv.calculate_totals()
         inv.save()
 
         # Create payment record for tracking
