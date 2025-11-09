@@ -118,67 +118,115 @@ def parse_invoice_data(text: str) -> dict:
     normalized_text = text.strip()
     lines = normalized_text.split('\n')
 
-    # Helper to find a field value by searching for the label and extracting the value
-    # This is more robust to PDF extraction variations
-    def find_value_after_label(pattern, max_lines=1):
-        """Find value that comes after a label pattern"""
-        for i, line in enumerate(lines):
-            if re.search(pattern, line, re.I):
-                # Found the label, now extract the value
-                # Value might be on same line or next line(s)
-                m = re.search(rf'{pattern}\s*[:=]\s*(.+?)$', line, re.I)
-                if m:
-                    value = m.group(1).strip()
-                    if value and value.upper() not in ('TEL', 'FAX', 'DEL', 'DATE', 'REF'):
-                        return value
+    # Clean and normalize lines
+    cleaned_lines = []
+    for line in lines:
+        cleaned = line.strip()
+        # Merge lines that are continuations (very short or just whitespace)
+        if cleaned and len(cleaned) > 2:
+            cleaned_lines.append(cleaned)
 
-                # Value might be on next line(s)
-                if max_lines > 1:
-                    values = []
-                    for j in range(1, max_lines):
-                        if i + j < len(lines):
-                            next_line = lines[i + j].strip()
-                            # Stop if we hit another label line or empty line followed by label
-                            if re.match(r'^[A-Z][a-zA-Z\s\.]*\s*[:=]', next_line) or not next_line:
-                                break
-                            values.append(next_line)
-                    if values:
-                        return ' '.join(values)
+    # Helper to find field value - try multiple strategies
+    def extract_field_value(label_patterns, text_to_search=None, multiline=False):
+        """Extract value after a label using flexible pattern matching"""
+        search_text = text_to_search or normalized_text
+
+        for pattern in (label_patterns if isinstance(label_patterns, list) else [label_patterns]):
+            # Try with colon separator
+            m = re.search(rf'{pattern}\s*:\s*([^\n:{{]+)', search_text, re.I | re.MULTILINE)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+
+            # Try with equals separator
+            m = re.search(rf'{pattern}\s*=\s*([^\n=]+)', search_text, re.I | re.MULTILINE)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+
+            # Try with just space separator (colon/equals optional)
+            m = re.search(rf'{pattern}\s+([A-Z][^\n:={{]+?)(?:\s+(?:Tel|Fax|Del|Ref|Date|Kind|Attended|Type|Payment|Delivery)|\n[A-Z]+\s|$)', search_text, re.I | re.MULTILINE)
+            if m and m.group(1).strip():
+                value = m.group(1).strip()
+                # Clean up
+                value = re.sub(r'\s+(Tel|Fax|Del|Date|Ref)\s*.*$', '', value, flags=re.I).strip()
+                return value if value else None
+
         return None
 
-    # Extract fields using label search
-    code_no = find_value_after_label(r'Code\s*(?:No|Number|#)')
-    customer_name = find_value_after_label(r'Customer\s*Name')
-    address = find_value_after_label(r'^Address', max_lines=3)  # Address can span multiple lines
+    # Extract Code No (specific pattern for Superdoll invoices)
+    code_no = extract_field_value([
+        r'Code\s*No',
+        r'Code\s*#',
+        r'Code(?:\s|:)'
+    ])
+
+    # Extract customer name
+    customer_name = extract_field_value([
+        r'Customer\s*Name',
+        r'Bill\s*To',
+        r'Buyer\s*Name'
+    ])
+
+    # Extract address (look for lines after "Address" label)
+    address = None
+    for i, line in enumerate(cleaned_lines):
+        if re.search(r'^Address\s*[:=]?', line, re.I):
+            # Get this line value and next lines if they're not labels
+            addr_parts = []
+            m = re.search(r'^Address\s*[:=]?\s*(.+)$', line, re.I)
+            if m:
+                addr_parts.append(m.group(1).strip())
+            # Collect next 2-3 lines as address continuation
+            for j in range(1, 4):
+                if i + j < len(cleaned_lines):
+                    next_line = cleaned_lines[i + j]
+                    # Stop if it's a new label
+                    if re.match(r'^[A-Z]+[a-zA-Z\s]*\s*[:=]', next_line) or re.match(r'^(?:Tel|Fax|Del|Kind|Attended|Reference)', next_line, re.I):
+                        break
+                    # Stop if it's an obviously different section (all caps, ends with colon)
+                    if next_line.isupper() and ':' in next_line:
+                        break
+                    addr_parts.append(next_line)
+            address = ' '.join(addr_parts)
+            if address:
+                break
 
     # Extract phone/tel
-    phone = find_value_after_label(r'(?:Tel|Telephone|Phone)(?!\s*Number)')
+    phone = extract_field_value(r'(?:Tel|Telephone)')
     if phone:
-        # Remove "Fax" part if present
-        phone = re.sub(r'\s*Fax.*$', '', phone, flags=re.I).strip()
-        # Remove empty labels like "Fax" alone
-        phone = re.sub(r'\s*Fax\s*$', '', phone, flags=re.I).strip()
-        # Check if valid (has digits)
-        if phone and not re.search(r'\d{7,}', phone):
+        # Remove "Fax" part if followed by fax number
+        phone = re.sub(r'\s+Fax\s+.*$', '', phone, flags=re.I).strip()
+        # Validate
+        if phone and not re.search(r'\d{5,}', phone):
             phone = None
 
     # Extract email
     email = None
-    email_match = re.search(r'([^\s\n]+@[^\s\n]+)', normalized_text)
+    email_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', normalized_text)
     if email_match:
         email = email_match.group(1)
 
     # Extract reference
-    reference = find_value_after_label(r'Reference')
+    reference = extract_field_value(r'(?:Reference|Ref\.?|For|FOR)')
 
     # Extract PI No. / Invoice Number
-    invoice_no = find_value_after_label(r'(?:PI\s*(?:No|Number)|PI\s*No|Invoice\s*(?:No|Number))')
+    invoice_no = extract_field_value([
+        r'PI\s*(?:No|Number|#)',
+        r'Invoice\s*(?:No|Number)'
+    ])
 
-    # Extract Date
+    # Extract Date (multiple formats)
     date_str = None
-    date_match = re.search(r'Date\s*[:=\s]+([0-3]?\d[/\-][01]?\d[/\-]\d{2,4})', normalized_text, re.I)
-    if date_match:
-        date_str = date_match.group(1)
+    # Look for date patterns
+    date_patterns = [
+        r'Date\s*[:=]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
+        r'Invoice\s*Date\s*[:=]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
+        r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',  # Fallback: any date pattern
+    ]
+    for pattern in date_patterns:
+        m = re.search(pattern, normalized_text, re.I)
+        if m:
+            date_str = m.group(1)
+            break
 
     # Parse monetary values helper
     def to_decimal(s):
