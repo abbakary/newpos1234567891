@@ -133,35 +133,43 @@ def parse_invoice_data(text: str) -> dict:
             cleaned_lines.append(cleaned)
 
     # Helper to find field value - try multiple strategies including searching ahead
-    def extract_field_value(label_patterns, text_to_search=None, max_distance=10):
+    def extract_field_value(label_patterns, text_to_search=None, max_distance=10, stop_at_patterns=None):
         """Extract value after a label using flexible pattern matching and distance-based search.
 
         This handles cases where PDF extraction scrambles text ordering.
         It looks for the label, then finds the most likely value nearby in the text.
+
+        Args:
+            label_patterns: Pattern(s) to match the label
+            text_to_search: Text to search in (default: normalized_text)
+            max_distance: Max lines to search for value
+            stop_at_patterns: Patterns that indicate we've hit the next field
         """
         search_text = text_to_search or normalized_text
         patterns = label_patterns if isinstance(label_patterns, list) else [label_patterns]
+        stop_patterns = stop_at_patterns or [
+            r'Tel|Fax|Del|Ref|Date|Kind|Attended|Type|Payment|Delivery|Reference|PI|Cust|Qty|Rate|Value|Address|Customer|Code'
+        ]
 
         for pattern in patterns:
-            # Strategy 1: Look for "Label: Value" or "Label = Value"
+            # Strategy 1: Look for "Label: Value" or "Label = Value" on same line
             m = re.search(rf'{pattern}\s*[:=]\s*([^\n:{{]+)', search_text, re.I | re.MULTILINE)
             if m and m.group(1).strip():
                 value = m.group(1).strip()
-                # Clean up trailing labels
-                value = re.sub(r'\s+(?:Tel|Fax|Del|Ref|Date|Kind|Attended|Type|Payment|Delivery|Reference|PI|Cust|Qty|Rate|Value)\b.*$', '', value, flags=re.I).strip()
-                if value:
+                # Don't clean up if it's a multi-word value (company names, addresses)
+                # Only clean if the value starts with a stop pattern
+                if not re.match(r'^(?:' + '|'.join([p for p in stop_patterns.split('|') if p.strip()]) + r')\b', value, re.I):
                     return value
 
             # Strategy 2: "Label Value" (space separated, often in scrambled PDFs)
             m = re.search(rf'{pattern}\s+(?![:=])([A-Z][^\n:{{]*?)(?=\n[A-Z]|\s{2,}[A-Z]|\n$|$)', search_text, re.I | re.MULTILINE)
             if m and m.group(1).strip():
                 value = m.group(1).strip()
-                # Remove any trailing keywords
-                value = re.sub(r'\s+(?:Tel|Fax|Del|Ref|Date|Kind|Attended|Type|Payment|Delivery|Reference|PI|Cust|Qty|Rate|Value|SR|NO)\b.*$', '', value, flags=re.I).strip()
-                if value and len(value) > 2:
+                # Skip if it looks like a label
+                if not re.match(r'^(?:' + '|'.join([p for p in stop_patterns.split('|') if p.strip()]) + r')\b', value, re.I) and len(value) > 2:
                     return value
 
-            # Strategy 3: Find label, then look for value on next non-empty line
+            # Strategy 3: Find label in a line, then look for value on next non-empty line
             lines = search_text.split('\n')
             for i, line in enumerate(lines):
                 if re.search(pattern, line, re.I):
@@ -169,19 +177,21 @@ def parse_invoice_data(text: str) -> dict:
                     m = re.search(rf'{pattern}\s*[:=]?\s*(.+)$', line, re.I)
                     if m:
                         value = m.group(1).strip()
-                        if value and value.upper() not in (':', '=', '') and not re.match(r'^(?:Tel|Fax|Del|Ref|Date)\b', value, re.I):
+                        if value and value.upper() not in (':', '=', ''):
                             return value
 
-                    # Look for value on next 2-3 lines (handles scrambled layouts)
-                    for j in range(1, min(4, len(lines) - i)):
+                    # Look for value on next lines (handles multi-line fields)
+                    for j in range(1, min(max_distance, len(lines) - i)):
                         next_line = lines[i + j].strip()
-                        if next_line and not re.match(r'^[A-Z]+[a-zA-Z\s]*\s*[:=]', next_line):
-                            # This looks like a value line
-                            if len(next_line) > 2 and not re.match(r'^(?:Tel|Fax|Del|Ref|Date|SR|NO|Code|Customer|Address)\b', next_line, re.I):
-                                return next_line
-                        elif re.match(r'^[A-Z]+[a-zA-Z\s]*\s*[:=]', next_line):
-                            # Hit another label, stop searching
+                        if not next_line:
+                            continue
+
+                        # Stop if it's a clear new label
+                        if re.match(r'^(?:' + '|'.join([p for p in stop_patterns.split('|') if p.strip()]) + r')\s*[:=]', next_line, re.I):
                             break
+
+                        # This line is likely the value
+                        return next_line
 
         return None
 
@@ -197,142 +207,173 @@ def parse_invoice_data(text: str) -> dict:
         """Check if text looks like a company/person name vs an address."""
         if not text:
             return False
-        # Customer names can be company names (usually all caps or mixed case) or person names
-        # They don't contain location indicators
-        address_keywords = ['street', 'avenue', 'road', 'box', 'p.o', 'po', 'floor', 'apt', 'suite', 'district', 'region']
-        has_no_address_keywords = not any(kw in text.lower() for kw in address_keywords)
-        # Company names often have 'CO', 'LTD', 'INC', etc.
-        is_capitalized = len(text) > 2 and (text[0].isupper() or text.isupper())
-        # Don't reject if it contains location names in a company context (like "SAID SALIM BAKHRESA CO LTD")
-        return has_no_address_keywords and is_capitalized and len(text) > 3
+        text_lower = text.lower()
+
+        # Strong address indicators
+        address_keywords = ['street', 'avenue', 'road', 'box', 'p.o', 'po box', 'floor', 'apt', 'suite',
+                           'district', 'region', 'city', 'zip', 'postal code', 'building']
+
+        # If it has strong address keywords, it's probably not a company name
+        for kw in address_keywords:
+            if kw in text_lower:
+                return False
+
+        # Company indicators (company names usually have these)
+        company_indicators = ['ltd', 'inc', 'corp', 'co', 'company', 'llc', 'limited', 'enterprise',
+                            'trading', 'group', 'industries', 'services', 'solutions', 'consulting']
+        has_company_indicator = any(ind in text_lower for ind in company_indicators)
+
+        # Must be reasonably capitalized/formatted
+        is_well_formatted = len(text) > 2 and (text[0].isupper() or text.isupper())
+
+        # Company names should be at least 4 chars, properly capitalized, and possibly have company indicators
+        return is_well_formatted and len(text) >= 4 and (has_company_indicator or ' ' not in text or len(text.split()) <= 5)
 
     def is_likely_address(text):
         """Check if text looks like an address."""
         if not text:
             return False
-        # Addresses often contain locations, street info, numbers, or are multi-word with specific patterns
-        address_indicators = ['street', 'avenue', 'road', 'box', 'p.o', 'po', 'floor', 'apt', 'suite',
-                             'district', 'region', 'city', 'country', 'zip', 'postal', 'dar', 'dar-es', 'tanzania', 'nairobi', 'kenya']
-        has_indicators = any(ind in text.lower() for ind in address_indicators)
+        text_lower = text.lower()
+
+        # Strong address indicators
+        address_indicators = ['street', 'avenue', 'road', 'box', 'p.o', 'po box', 'floor', 'apt', 'suite',
+                             'district', 'region', 'city', 'country', 'zip', 'postal', 'dar', 'dar-es',
+                             'tanzania', 'nairobi', 'kenya', 'building']
+
+        # Has location name or postal indicators
+        has_indicators = any(ind in text_lower for ind in address_indicators)
+
+        # Has numbers (house/building numbers)
         has_numbers = bool(re.search(r'\d+', text))
-        has_multipart = ',' in text or len(text.split()) > 2  # Addresses often have multiple parts
-        return has_indicators or (has_numbers and has_multipart)
 
-    # Extract customer name
-    customer_name = extract_field_value([
-        r'Customer\s*Name',
-        r'Bill\s*To',
-        r'Buyer\s*Name',
-        r'Client\s*Name'
-    ])
+        # Has multiple parts (usually separated by commas or just multiple words)
+        has_multipart = ',' in text or ' ' in text
 
-    # Validate customer name - if it looks like an address, clear it
-    if customer_name and is_likely_address(customer_name) and not is_likely_customer_name(customer_name):
-        customer_name = None
+        # Address must have indicators OR have numbers and multiple parts
+        return has_indicators or (has_numbers and has_multipart and len(text) > 5)
 
-    # Extract address (look for lines after "Address" label) - improved to handle multi-line addresses
-    address = None
-    for i, line in enumerate(cleaned_lines):
-        if re.search(r'^Address\s*[:=]?', line, re.I):
-            # Get this line value and next lines if they're not labels
-            addr_parts = []
-            m = re.search(r'^Address\s*[:=]?\s*(.+)$', line, re.I)
-            if m:
-                addr_val = m.group(1).strip()
-                # Only add if it's not empty and not another label
-                if addr_val and not re.match(r'^[A-Z]+[a-zA-Z\s]*\s*[:=]', addr_val):
-                    addr_parts.append(addr_val)
+    # Extract customer name - more careful pattern matching
+    customer_name = None
 
-            # Collect next 3-4 lines as address continuation
-            # Stop when we hit a clear label line or reach the end
-            for j in range(1, 5):
-                if i + j < len(cleaned_lines):
-                    next_line = cleaned_lines[i + j]
-                    # Skip empty lines
-                    if not next_line.strip():
-                        continue
+    # First try the exact "Customer Name" pattern
+    m = re.search(r'Customer\s*Name\s*[:=]?\s*([^\n:{{]+?)(?=\n(?:Address|Tel|Attended|Kind|Reference|PI|Code)|$)', normalized_text, re.I | re.MULTILINE | re.DOTALL)
+    if m:
+        customer_name = m.group(1).strip()
+        # Clean up any trailing field indicators
+        customer_name = re.sub(r'\s+(?:Address|Tel|Phone|Fax|Email|Attended|Kind|Ref)\b.*$', '', customer_name, flags=re.I).strip()
 
-                    # Stop if it's a clear new label (pattern: "Label :" or "Label =")
-                    if re.match(r'^[A-Z][a-zA-Z\s]*\s*[:=]', next_line, re.I):
-                        break
+    # If still not found, try alternative patterns
+    if not customer_name:
+        customer_name = extract_field_value([
+            r'Bill\s*To',
+            r'Buyer\s*Name',
+            r'Client\s*Name'
+        ])
 
-                    # Stop if it's a known field label
-                    if re.match(r'^(?:Tel|Telephone|Phone|Fax|Del\.|Ref|Date|PI|Kind|Attended|Type|Payment|Delivery|Reference)\b', next_line, re.I):
-                        break
-
-                    # This line is likely part of the address
-                    # Skip very long lines that might be from a different section
-                    if len(next_line) < 150:
-                        addr_parts.append(next_line)
-
-            # Join address parts with space or newline
-            if addr_parts:
-                address = ' '.join(addr_parts).strip()
-                # Clean up any trailing noise
-                address = re.sub(r'\s+(?:Tel|Fax|Del|Ref|Date|PI|Cust|Kind|Attended|Type|Payment|Delivery|Reference)\b.*$', '', address, flags=re.I).strip()
-                if address:
-                    break
-
-    # Smart fix: If customer_name is empty but address looks like a name, swap them
-    if not customer_name and address and is_likely_customer_name(address):
-        customer_name = address
-        address = None
-
-    # Also check reverse: if customer_name looks like address and address is empty, swap
-    if customer_name and is_likely_address(customer_name) and not is_likely_customer_name(customer_name):
-        if not address:
-            address = customer_name
+    # Validate customer name - if it looks like an address, clear it and we'll get it from Address field
+    if customer_name:
+        if is_likely_address(customer_name) and not is_likely_customer_name(customer_name):
+            # This looks like an address, not a customer name
+            customer_name = None
+        elif len(customer_name) > 200:
+            # Too long to be a name, probably corrupted
             customer_name = None
 
-    # Extract phone/tel - improved to handle various formats
-    phone = extract_field_value(r'(?:Tel|Telephone|Phone)')
-    if phone:
-        # Remove "Fax" part if followed by fax number
-        phone = re.sub(r'[\s/]+Fax.*$', '', phone, flags=re.I).strip()
-        # Remove trailing non-numeric characters
-        phone = re.sub(r'[\s/]+.*(?:Tel|Fax|Email|Address|Ref)\b.*$', '', phone, flags=re.I).strip()
-        # Validate - phone should have some digits (at least 5 consecutive digits or similar patterns)
-        if phone and not re.search(r'\d{5,}', phone):
-            phone = None
-        # Clean up - remove common non-digit prefixes and ensure we have a phone
-        if phone:
-            phone = re.sub(r'^(?:Tel|Phone|Telephone)\s*[:=]?\s*', '', phone, flags=re.I).strip()
-            # If phone contains "/" or "-", keep first meaningful number
-            if '/' in phone:
-                parts = phone.split('/')
-                phone = parts[0].strip()
-            # Final validation - must have digits
-            if phone and not re.search(r'\d', phone):
-                phone = None
+    # Extract address - improved to handle multi-line addresses
+    address = None
+    address_pattern = re.compile(r'Address\s*[:=]?\s*(.+?)(?=\n(?:Tel|Attended|Kind|Reference|PI|Code|Fax|Del\.|Remarks|NOTE|Payment|Delivery)\b|$)', re.I | re.MULTILINE | re.DOTALL)
+    address_match = address_pattern.search(normalized_text)
 
-    # Extract email
+    if address_match:
+        address_text = address_match.group(1).strip()
+        # Clean up the address text - remove trailing labels/keywords
+        address_text = re.sub(r'\s+(?:Tel|Phone|Fax|Attended|Kind|Reference|Ref\.|Date|PI|Code|Type|Payment|Delivery|Remarks|NOTE|Qty|Rate|Value)\b.*', '', address_text, flags=re.I).strip()
+        # Keep newlines in address for readability (they're often multi-line)
+        address_text = ' '.join(line.strip() for line in address_text.split('\n') if line.strip())
+        if address_text and len(address_text) > 2:
+            address = address_text
+
+    # Smart fix: If customer_name is empty but address looks like it contains the name
+    # Try to split the address and extract name from first line
+    if not customer_name and address:
+        # Take first line of address if it looks like a name
+        first_line = address.split('\n')[0] if '\n' in address else address.split()[0:3]
+        potential_name = ' '.join(first_line) if isinstance(first_line, list) else first_line
+
+        if is_likely_customer_name(potential_name):
+            customer_name = potential_name
+            # Remove the name part from address
+            address = re.sub(r'^' + re.escape(potential_name) + r'\s*', '', address).strip()
+            if not address or len(address) < 3:
+                address = None
+
+    # Extract phone/tel - improved to handle various formats
+    phone = None
+    phone_pattern = re.compile(r'Tel\s*[:=]?\s*([^\n:{{]+?)(?=\n(?:Fax|Attended|Kind|Reference|Remarks|Date|Del\.|PI)\b|$)', re.I | re.MULTILINE)
+    phone_match = phone_pattern.search(normalized_text)
+
+    if phone_match:
+        phone = phone_match.group(1).strip()
+        # Remove "Fax" part if it appears
+        phone = re.sub(r'[\s/]+(?:Fax.*)?$', '', phone, flags=re.I).strip()
+        # Validate - phone should have some digits or be a descriptive value like "Sales Point"
+        if phone and (re.search(r'\d', phone) or len(phone) > 3):
+            # If contains slash or hyphen with numbers, keep first part
+            if '/' in phone or '-' in phone:
+                parts = re.split(r'[\/-]', phone)
+                phone = parts[0].strip()
+        else:
+            phone = None
+
+    # Extract email - look for email pattern in the text
     email = None
     email_match = re.search(r'([\w\.-]+@[\w\.-]+\.\w+)', normalized_text)
     if email_match:
         email = email_match.group(1)
 
-    # Extract reference
-    reference = extract_field_value(r'(?:Reference|Ref\.?|For|FOR)')
+    # Extract reference - more careful pattern to avoid getting other labels
+    reference = None
+    ref_pattern = re.compile(r'(?:Reference|Ref\.?)\s*[:=]?\s*([^\n:{{]+?)(?=\n(?:Tel|Code|PI|Date|Del\.|Attended|Kind|Remarks)\b|$)', re.I | re.MULTILINE)
+    ref_match = ref_pattern.search(normalized_text)
 
-    # Extract PI No. / Invoice Number
-    invoice_no = extract_field_value([
-        r'PI\s*(?:No|Number|#)',
-        r'Invoice\s*(?:No|Number)'
-    ])
+    if ref_match:
+        reference = ref_match.group(1).strip()
+        # Clean up
+        reference = re.sub(r'\s+(?:Tel|Fax|Date|PI|Code)\b.*$', '', reference, flags=re.I).strip()
+        if not reference or reference.upper() == 'NONE' or len(reference) < 2:
+            reference = None
+
+    # Extract PI No. / Invoice Number - specifically handle "PI No." format
+    invoice_no = None
+    pi_pattern = re.compile(r'PI\s*(?:No|Number|#)\s*[:=]?\s*([^\n:{{]+?)(?=\n|$)', re.I | re.MULTILINE)
+    pi_match = pi_pattern.search(normalized_text)
+
+    if pi_match:
+        invoice_no = pi_match.group(1).strip()
+        # Clean up trailing whitespace and field names
+        invoice_no = re.sub(r'\s+(?:Date|Cust|Ref|Del|Code)\b.*$', '', invoice_no, flags=re.I).strip()
+
+    # Fallback to "Invoice Number" pattern if PI No not found
+    if not invoice_no:
+        invoice_no = extract_field_value([
+            r'Invoice\s*(?:No|Number)',
+            r'Invoice\s*Number'
+        ])
 
     # Extract Date (multiple formats)
     date_str = None
-    # Look for date patterns
+    # Look for date patterns - prioritize those near labels
     date_patterns = [
-        r'Date\s*[:=]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
-        r'Invoice\s*Date\s*[:=]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',
-        r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})',  # Fallback: any date pattern
+        (r'(?:Invoice\s*)?Date\s*[:=]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', True),  # "Date: DD/MM/YYYY"
+        (r'(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})', False),  # Any date pattern (fallback)
     ]
-    for pattern in date_patterns:
+
+    for pattern, is_priority in date_patterns:
         m = re.search(pattern, normalized_text, re.I)
         if m:
             date_str = m.group(1)
-            break
+            if is_priority:
+                break
 
     # Parse monetary values helper
     def to_decimal(s):
@@ -410,13 +451,19 @@ def parse_invoice_data(text: str) -> dict:
         r'Total\s*(?::|\s)'
     ]))
 
-    # Extract payment method
-    payment_method = extract_field_value(r'(?:Payment|Payment\s*Method|Payment\s*Type)')
-    if payment_method:
-        # Clean up the payment method value
-        payment_method = re.sub(r'Delivery.*$', '', payment_method, flags=re.I).strip()
+    # Extract payment method - careful pattern to extract payment terms
+    payment_method = None
+    payment_pattern = re.compile(r'(?:Payment|Payment\s*Method|Payment\s*Type)\s*[:=]?\s*([^\n:{{]+?)(?=\n|$)', re.I | re.MULTILINE)
+    payment_match = payment_pattern.search(normalized_text)
+
+    if payment_match:
+        payment_method = payment_match.group(1).strip()
+        # Clean up
+        payment_method = re.sub(r'\s+(?:Delivery|Remarks|Net|Gross|Due|NOTE)\b.*$', '', payment_method, flags=re.I).strip()
+
         if payment_method and len(payment_method) > 1:
-            # Map common payment method strings to standard values
+            # Normalize the payment method
+            payment_lower = payment_method.lower()
             payment_map = {
                 'cash': 'cash',
                 'cheque': 'cheque',
@@ -429,28 +476,68 @@ def parse_invoice_data(text: str) -> dict:
                 'delivery': 'on_delivery',
                 'cod': 'on_delivery',
             }
+
+            normalized = None
             for key, val in payment_map.items():
-                if key in payment_method.lower():
-                    payment_method = val
+                if key in payment_lower:
+                    normalized = val
                     break
 
-    # Extract delivery terms
-    delivery_terms = extract_field_value(r'(?:Delivery|Delivery\s*Terms)')
-    if delivery_terms:
-        delivery_terms = re.sub(r'(?:Remarks|Notes|NOTE).*$', '', delivery_terms, flags=re.I).strip()
+            if normalized:
+                payment_method = normalized
+            # Keep original if no mapping found
+        else:
+            payment_method = None
 
-    # Extract remarks/notes
-    remarks = extract_field_value(r'(?:Remarks|Notes|NOTE)')
-    if remarks:
-        # Clean up - remove trailing labels and numbers
+    # Extract delivery terms - improved pattern
+    delivery_terms = None
+    delivery_pattern = re.compile(r'(?:Delivery|Delivery\s*Terms)\s*[:=]?\s*([^\n:{{]+?)(?=\n|$)', re.I | re.MULTILINE)
+    delivery_match = delivery_pattern.search(normalized_text)
+
+    if delivery_match:
+        delivery_terms = delivery_match.group(1).strip()
+        # Clean up
+        delivery_terms = re.sub(r'\s+(?:Remarks|Notes|NOTE|Net|Gross|Payment)\b.*$', '', delivery_terms, flags=re.I).strip()
+        if not delivery_terms or len(delivery_terms) < 2:
+            delivery_terms = None
+
+    # Extract remarks/notes - improved pattern
+    remarks = None
+    remarks_pattern = re.compile(r'(?:Remarks|Notes|NOTE)\s*[:=]?\s*(.+?)(?=\n(?:Payment|Delivery|Net|Gross|NOTE|Authorized|Qty|Code)\b|$)', re.I | re.MULTILINE | re.DOTALL)
+    remarks_match = remarks_pattern.search(normalized_text)
+
+    if remarks_match:
+        remarks = remarks_match.group(1).strip()
+        # Clean up - remove extra spaces, newlines, and trailing labels
+        remarks = ' '.join(remarks.split())
         remarks = re.sub(r'(?:\d+\s*:|^NOTE\s*\d+\s*:)', '', remarks, flags=re.I).strip()
-        remarks = re.sub(r'(?:Payment|Delivery|Due|See).*$', '', remarks, flags=re.I).strip()
+        remarks = re.sub(r'(?:Payment|Delivery|Due|See|Qty|Code|SR)\b.*$', '', remarks, flags=re.I).strip()
+        if not remarks or len(remarks) < 2:
+            remarks = None
 
-    # Extract "Attended By" field
-    attended_by = extract_field_value(r'(?:Attended\s*By|Attended|Served\s*By)')
+    # Extract "Attended By" field - more careful pattern matching
+    attended_by = None
+    attended_pattern = re.compile(r'Attended\s*(?:By|:)?\s*([^\n:{{]+?)(?=\n(?:Kind|Reference|Tel|Remarks|Payment)\b|$)', re.I | re.MULTILINE)
+    attended_match = attended_pattern.search(normalized_text)
 
-    # Extract "Kind Attention" field
-    kind_attention = extract_field_value(r'(?:Kind\s*Attention|Kind\s*Attn)')
+    if attended_match:
+        attended_by = attended_match.group(1).strip()
+        # Clean up
+        attended_by = re.sub(r'\s+(?:Kind|Reference|Tel|Remarks|Payment)\b.*$', '', attended_by, flags=re.I).strip()
+        if not attended_by or len(attended_by) < 2:
+            attended_by = None
+
+    # Extract "Kind Attention" field - handles both "Kind Attention" and "Kind Attn"
+    kind_attention = None
+    kind_pattern = re.compile(r'Kind\s*(?:Attention|Attn|:)?\s*([^\n:{{]+?)(?=\n(?:Reference|Remarks|Tel|Attended|Payment|Delivery)\b|$)', re.I | re.MULTILINE)
+    kind_match = kind_pattern.search(normalized_text)
+
+    if kind_match:
+        kind_attention = kind_match.group(1).strip()
+        # Clean up
+        kind_attention = re.sub(r'\s+(?:Reference|Remarks|Tel|Attended|Payment|Delivery)\b.*$', '', kind_attention, flags=re.I).strip()
+        if not kind_attention or len(kind_attention) < 2:
+            kind_attention = None
 
     # Extract line items with improved detection for various formats
     # The algorithm:
