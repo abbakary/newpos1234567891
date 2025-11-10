@@ -197,8 +197,8 @@
 
                   <div class="col-md-6">
                     <label class="form-label">Customer Name</label>
-                    {{ form.customer_full_name }}
-                    {% if form.customer_full_name.errors %}<div class="text-danger f-12">{{ form.customer_full_name.errors|striptags }}</div>{% endif %}
+                    {{ form.customer_name }}
+                    {% if form.customer_name.errors %}<div class="text-danger f-12">{{ form.customer_name.errors|striptags }}</div>{% endif %}
                   </div>
 
                   <div class="col-md-6">
@@ -719,7 +719,19 @@
                         const paymentMethod = hdr.payment_method || '';
                         const deliveryTerms = hdr.delivery_terms || '';
 
-                        let headerHtml = `<div class="mb-3"><strong>Invoice Information</strong></div>
+                        let sellerInfo = '';
+                        if (hdr.seller_name) {
+                          sellerInfo += `<div class="mb-3"><strong>Seller / Supplier</strong></div>`;
+                          sellerInfo += `<div class="row mb-2"><div class="col-12"><strong>${hdr.seller_name}</strong></div></div>`;
+                          if (hdr.seller_address) sellerInfo += `<div class="row mb-2"><div class="col-12">${hdr.seller_address}</div></div>`;
+                          if (hdr.seller_phone) sellerInfo += `<div class="row mb-2"><div class="col-12"><strong>Phone:</strong> ${hdr.seller_phone}</div></div>`;
+                          if (hdr.seller_email) sellerInfo += `<div class="row mb-2"><div class="col-12"><strong>Email:</strong> ${hdr.seller_email}</div></div>`;
+                          if (hdr.seller_tax_id) sellerInfo += `<div class="row mb-2"><div class="col-12"><strong>Tax ID:</strong> ${hdr.seller_tax_id}</div></div>`;
+                          if (hdr.seller_vat_reg) sellerInfo += `<div class="row mb-2"><div class="col-12"><strong>VAT Reg:</strong> ${hdr.seller_vat_reg}</div></div>`;
+                          sellerInfo += '<hr/>';
+                        }
+
+                        let headerHtml = sellerInfo + `<div class="mb-3"><strong>Invoice Information</strong></div>
                           <div class="row mb-2">
                             <div class="col-md-6"><strong>Invoice No:</strong> ${invoiceNo}</div>
                             <div class="col-md-6"><strong>Date:</strong> ${date}</div>
@@ -796,7 +808,7 @@
                     if (!f) return;
 
                     const map = {
-                      'customer_full_name': hdr.customer_name || '',
+                      'customer_name': hdr.customer_name || '',
                       'customer_phone': hdr.phone || '',
                       'customer_email': hdr.email || '',
                       'customer_address': hdr.address || '',
@@ -814,6 +826,21 @@
                         el.dispatchEvent(new Event('input', {bubbles: true}));
                         el.dispatchEvent(new Event('change', {bubbles: true}));
                       }
+                    });
+
+                    // Inject seller fields as hidden inputs so they are submitted with the form
+                    const sellerKeys = ['seller_name','seller_address','seller_phone','seller_email','seller_tax_id','seller_vat_reg'];
+                    sellerKeys.forEach(sk=>{
+                      const val = hdr[sk] || '';
+                      if (!val) return;
+                      let inp = f.querySelector('[name="'+sk+'"]');
+                      if (!inp) {
+                        inp = document.createElement('input');
+                        inp.type = 'hidden';
+                        inp.name = sk;
+                        f.appendChild(inp);
+                      }
+                      inp.value = val;
                     });
 
                     if (hdr.date) {

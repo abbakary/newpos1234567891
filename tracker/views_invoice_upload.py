@@ -109,6 +109,12 @@ def api_extract_invoice_preview(request):
             'remarks': header.get('remarks'),
             'attended_by': header.get('attended_by'),
             'kind_attention': header.get('kind_attention'),
+            'seller_name': header.get('seller_name'),
+            'seller_address': header.get('seller_address'),
+            'seller_phone': header.get('seller_phone'),
+            'seller_email': header.get('seller_email'),
+            'seller_tax_id': header.get('seller_tax_id'),
+            'seller_vat_reg': header.get('seller_vat_reg'),
         },
         'items': [
             {
@@ -267,6 +273,14 @@ def api_create_invoice_from_upload(request):
             inv.attended_by = request.POST.get('attended_by', '').strip() or None
             inv.kind_attention = request.POST.get('kind_attention', '').strip() or None
             inv.remarks = request.POST.get('remarks', '').strip() or None
+
+            # Seller information (if provided via POST from extraction preview)
+            inv.seller_name = (request.POST.get('seller_name') or '').strip() or None
+            inv.seller_address = (request.POST.get('seller_address') or '').strip() or None
+            inv.seller_phone = (request.POST.get('seller_phone') or '').strip() or None
+            inv.seller_email = (request.POST.get('seller_email') or '').strip() or None
+            inv.seller_tax_id = (request.POST.get('seller_tax_id') or '').strip() or None
+            inv.seller_vat_reg = (request.POST.get('seller_vat_reg') or '').strip() or None
 
             # Parse amounts
             subtotal = Decimal(str(request.POST.get('subtotal', '0') or '0').replace(',', ''))

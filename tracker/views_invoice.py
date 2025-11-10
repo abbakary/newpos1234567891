@@ -285,6 +285,14 @@ def api_upload_extract_invoice(request):
         inv.remarks = (header.get('remarks') or '').strip() or None
         inv.notes = (header.get('notes') or '').strip() or ''
 
+        # Seller information (do not map seller into customer)
+        inv.seller_name = (header.get('seller_name') or '').strip() or None
+        inv.seller_address = (header.get('seller_address') or '').strip() or None
+        inv.seller_phone = (header.get('seller_phone') or '').strip() or None
+        inv.seller_email = (header.get('seller_email') or '').strip() or None
+        inv.seller_tax_id = (header.get('seller_tax_id') or '').strip() or None
+        inv.seller_vat_reg = (header.get('seller_vat_reg') or '').strip() or None
+
         # Set monetary fields with proper defaults (use correct field names from extraction)
         inv.subtotal = header.get('subtotal') or Decimal('0')
         inv.tax_amount = header.get('tax') or Decimal('0')
@@ -357,6 +365,16 @@ def api_upload_extract_invoice(request):
                     # Get item code and description
                     item_code = (it.get('item_code') or it.get('code') or '').strip() or None
                     description = (it.get('description') or 'Item').strip()
+
+                    # Skip header-like rows accidentally parsed as items (e.g., "Customer Name", "Address", etc.)
+                    desc_l = description.lower()
+                    header_keywords = [
+                        'customer name', 'address', 'tel', 'telephone', 'fax', 'email', 'date',
+                        'code', 'code no', 'reference', 'pi no', 'kind attn', 'attended by', 'notes',
+                        'delivery', 'payment', 'vat', 'gross value', 'net value', 'subtotal', 'total'
+                    ]
+                    if any(desc_l == k or desc_l.startswith(k) for k in header_keywords):
+                        continue
 
                     # Create line item with proper unit_price
                     line = InvoiceLineItem(
@@ -473,7 +491,7 @@ def invoice_create(request, order_id=None):
                 if cd.get('existing_customer'):
                     customer_obj = cd.get('existing_customer')
                 else:
-                    name = (cd.get('customer_full_name') or '').strip()
+                    name = (cd.get('customer_name') or '').strip()
                     phone = (cd.get('customer_phone') or '').strip()
 
                     if name and phone:
