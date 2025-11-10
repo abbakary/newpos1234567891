@@ -527,6 +527,11 @@
     <div class="invoice-footer">
       <p><strong>Authorised Signatory</strong></p>
       <p>______________________________</p>
+      {% if invoice.attended_by %}
+      <p><strong>Prepared By:</strong> {{ invoice.attended_by }}</p>
+      {% elif invoice.created_by %}
+      <p><strong>Prepared By:</strong> {{ invoice.created_by.get_full_name|default:invoice.created_by.username }}</p>
+      {% endif %}
       <p>Generated on {{ "now"|date:"d/m/Y H:i" }}</p>
     </div>
 
